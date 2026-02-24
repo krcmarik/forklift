@@ -16,6 +16,7 @@ import (
 	api "github.com/kubev2v/forklift/pkg/apis/forklift/v1beta1"
 	refapi "github.com/kubev2v/forklift/pkg/apis/forklift/v1beta1/ref"
 	"github.com/kubev2v/forklift/pkg/controller/plan/adapter"
+	planbase "github.com/kubev2v/forklift/pkg/controller/plan/adapter/base"
 	plancontext "github.com/kubev2v/forklift/pkg/controller/plan/context"
 	model "github.com/kubev2v/forklift/pkg/controller/provider/model/ocp"
 	"github.com/kubev2v/forklift/pkg/controller/provider/web"
@@ -60,6 +61,7 @@ const (
 	VMStorageNotMapped              = "VMStorageNotMapped"
 	VMStorageNotSupported           = "VMStorageNotSupported"
 	VMMultiplePodNetworkMappings    = "VMMultiplePodNetworkMappings"
+	VMDuplicateNADMappings          = "VMDuplicateNADMappings"
 	VMMissingGuestIPs               = "VMMissingGuestIPs"
 	VMIpNotMatchingUdnSubnet        = "VMIpNotMatchingUdnSubnet"
 	VMMissingChangedBlockTracking   = "VMMissingChangedBlockTracking"
@@ -672,6 +674,14 @@ func (r *Reconciler) validateVM(plan *api.Plan) error {
 		Message:  "VM has more than one interface mapped to the pod network.",
 		Items:    []string{},
 	}
+	duplicateNADMappings := libcnd.Condition{
+		Type:     VMDuplicateNADMappings,
+		Status:   True,
+		Reason:   NotValid,
+		Category: api.CategoryCritical,
+		Message:  "Multiple VM NICs use the same Multus NAD name (OVN-Kubernetes uses NAD names as map keys).",
+		Items:    []string{},
+	}
 	missingStaticIPs := libcnd.Condition{
 		Type:     VMMissingGuestIPs,
 		Status:   True,
@@ -947,12 +957,16 @@ func (r *Reconciler) validateVM(plan *api.Plan) error {
 			if !ok {
 				unmappedNetwork.Items = append(unmappedNetwork.Items, ref.String())
 			}
-			ok, err = validator.PodNetwork(*ref)
-			if err != nil {
-				return err
+			nicRefs, nErr := validator.NICNetworkRefs(*ref)
+			if nErr != nil {
+				return nErr
 			}
-			if !ok {
+			foundNadDup, foundPodDup := planbase.ValidateNetworkDuplicates(nicRefs, plan.Referenced.Map.Network)
+			if foundPodDup {
 				multiplePodNetworkMappings.Items = append(multiplePodNetworkMappings.Items, ref.String())
+			}
+			if foundNadDup {
+				duplicateNADMappings.Items = append(duplicateNADMappings.Items, ref.String())
 			}
 		}
 		if plan.Referenced.Map.Storage != nil {
@@ -1185,6 +1199,9 @@ func (r *Reconciler) validateVM(plan *api.Plan) error {
 	}
 	if len(multiplePodNetworkMappings.Items) > 0 {
 		plan.Status.SetCondition(multiplePodNetworkMappings)
+	}
+	if len(duplicateNADMappings.Items) > 0 {
+		plan.Status.SetCondition(duplicateNADMappings)
 	}
 	if len(missingStaticIPs.Items) > 0 {
 		plan.Status.SetCondition(missingStaticIPs)
